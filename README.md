@@ -1,54 +1,55 @@
-# OpenClaw Session Viewer
+# OpenClaw 日志查看器
 
-A lightweight Streamlit web UI for browsing and debugging [OpenClaw](https://openclaw.ai) agent session logs (`.jsonl` files) in real time.
+用于实时浏览和调试 [OpenClaw](https://openclaw.ai) Agent 会话日志（`.jsonl` 文件）的轻量级 Streamlit Web UI。
 
-## Features
+## 功能特性
 
-- 📂 Lists all `.jsonl` session files, sorted by last modified time
-- 💬 Renders user/assistant messages as chat bubbles
-- 💭 Expandable **思考过程 (Chain of Thought)** with optional Chinese translation via Google Translate
-- 🛠️ Collapsible tool calls with syntax-highlighted arguments
-- ✅/❌ Tool results with error highlighting and exit code detection
-- ⚡ **Tail-first loading** — only reads the last 256 KB on open; older chunks loaded on demand
-- 🔄 **1-second auto-refresh** — appends new lines without reloading the whole file
-- 🌐 **Chinese translation toggle** for agent reasoning text (cached, non-blocking)
-- nginx reverse proxy with gzip compression for faster remote access
+- 📂 列出所有 `.jsonl` 会话文件，按最后修改时间倒序排列
+- 💬 用户/助手消息以聊天气泡形式渲染
+- 💭 可展开的**思考过程**，支持一键切换中文翻译
+- 🛠️ 工具调用折叠展示，参数语法高亮
+- ✅/❌ 工具结果自动标注状态，错误内容红色高亮
+- ⚡ **尾部优先加载**——打开时只读最后 256KB，旧内容按需加载
+- 🔄 **1 秒自动刷新**——增量追加新行，无需重载整个文件
+- 🌐 Agent 推理文本**中文翻译**（Google Translate，结果缓存，不重复翻译）
+- 📋 Telegram 消息元数据自动折叠，正文始终可见
+- nginx 反向代理，开启 gzip 压缩，适合远程访问
 
-## Quick Start
+## 快速开始
 
 ```bash
-# Clone
-git clone https://github.com/your-username/openclaw-ui.git
-cd openclaw-ui
+# 克隆仓库
+git clone https://github.com/Davidshu-git/openclaw-log-ui.git
+cd openclaw-log-ui
 
-# Set your sessions directory (defaults to ~/.openclaw/agents/main/sessions)
+# 设置会话日志目录（默认为 ~/.openclaw/agents/main/sessions）
 export OPENCLAW_SESSIONS_DIR=~/.openclaw/agents/main/sessions
 
-# Start
+# 启动
 UID=$(id -u) GID=$(id -g) docker compose up -d --build
 
-# Open http://localhost:8501
+# 访问 http://localhost:8501
 ```
 
-## Configuration
+## 配置说明
 
-| Environment Variable | Default | Description |
+| 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | Path to session `.jsonl` files |
-| `OPENCLAW_CRON_DIR` | `~/.openclaw/cron/runs` | Path to cron run logs (optional, see compose file) |
-| `LOG_DIR` | `/sessions` | Mount point inside the container |
-| `CHUNK_BYTES` | `262144` (256 KB) | Bytes to read per chunk |
+| `OPENCLAW_SESSIONS_DIR` | `~/.openclaw/agents/main/sessions` | 会话 `.jsonl` 文件目录 |
+| `OPENCLAW_CRON_DIR` | `~/.openclaw/cron/runs` | 定时任务日志目录（可选，见 compose 文件） |
+| `LOG_DIR` | `/sessions` | 容器内挂载路径 |
+| `CHUNK_BYTES` | `262144`（256KB） | 每次读取的块大小 |
 
-## Project Structure
+## 目录结构
 
 ```
-openclaw-ui/
-├── app.py              # Streamlit application
-├── requirements.txt    # Python dependencies
-├── Dockerfile          # python:3.12-slim image
-├── docker-compose.yml  # streamlit + nginx services
+openclaw-log-ui/
+├── app.py              # Streamlit 应用主文件
+├── requirements.txt    # Python 依赖
+├── Dockerfile          # 基于 python:3.12-slim
+├── docker-compose.yml  # streamlit + nginx 双服务
 ├── nginx/
-│   └── default.conf    # gzip + static asset caching + WebSocket proxy
+│   └── default.conf    # gzip 压缩 + 静态资源缓存 + WebSocket 代理
 └── .streamlit/
-    └── config.toml     # Streamlit server config
+    └── config.toml     # Streamlit 服务配置
 ```
