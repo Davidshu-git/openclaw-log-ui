@@ -424,7 +424,7 @@ def sidebar() -> str | None:
         auto_refresh = st.toggle("🔄 自动刷新（1s）", value=True)
         refresh_interval = 1
         translate = st.toggle("🌐 中文翻译思考过程", value=True)
-        page_size = 5
+        page_size = 10
 
         return options.get(selected_label), auto_refresh, refresh_interval, page_size, translate
 
