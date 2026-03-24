@@ -1,0 +1,28 @@
+services:
+  streamlit:
+    build: .
+    container_name: openclaw-ui-streamlit
+    restart: unless-stopped
+    # No longer exposed directly; nginx is the entry point
+    expose:
+      - "8501"
+    volumes:
+      - ./app.py:/app/app.py:ro
+      - ${OPENCLAW_SESSIONS_DIR:-~/.openclaw/agents/main/sessions}:/sessions:ro
+      # Uncomment to also expose cron run logs:
+      # - ${OPENCLAW_CRON_DIR:-~/.openclaw/cron/runs}:/sessions/cron-runs:ro
+    environment:
+      - LOG_DIR=/sessions
+      - AUTO_REFRESH_INTERVAL=5
+    user: "${UID:-1000}:${GID:-1000}"
+
+  nginx:
+    image: nginx:alpine
+    container_name: openclaw-ui
+    restart: unless-stopped
+    ports:
+      - "8501:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - streamlit
