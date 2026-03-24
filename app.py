@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import glob
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -34,6 +33,31 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+st.markdown("""
+<style>
+/* 减少主区域顶部空白 */
+.block-container { padding-top: 1rem !important; padding-bottom: 0.5rem !important; }
+
+/* 缩小侧边栏顶部空白 */
+[data-testid="stSidebar"] > div:first-child { padding-top: 0.75rem !important; }
+
+/* 侧边栏标题紧凑化 */
+[data-testid="stSidebar"] h3 { margin-bottom: 0.1rem !important; }
+
+/* 压缩 info/warning 框的内边距 */
+[data-testid="stAlert"] { padding: 0.5rem 0.75rem !important; }
+
+/* 减少 divider 上下间距 */
+hr { margin: 0.4rem 0 !important; }
+
+/* chat message 减少上下 padding */
+[data-testid="stChatMessage"] { padding: 0.4rem 0.6rem !important; }
+
+/* caption 字体略小一点 */
+[data-testid="stCaptionContainer"] p { font-size: 0.76rem !important; color: #888 !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -388,8 +412,7 @@ def render_records(records: list[dict], translate: bool = False):
 def sidebar() -> str | None:
     """Render sidebar and return selected file path (or None)."""
     with st.sidebar:
-        st.title("🦞 OpenClaw 日志")
-        st.caption(f"日志目录: `{LOG_DIR}`")
+        st.markdown("### 🦞 OpenClaw 日志")
         st.divider()
 
         files = list_jsonl_files(LOG_DIR)
@@ -449,22 +472,25 @@ def render_session(page_size: int):
     visible = reversed_records[start: start + page_size]
 
     new_count = st.session_state.get("last_new_count", 0)
-    loaded_label = "全部" if fully_loaded else f"{cache['head_offset'] // 1024}KB+"
-    suffix = f" · 新增 {new_count} 条" if new_count > 0 else ""
-    st.caption(f"已加载 {total} 条（{loaded_label}）· 第 {page}/{max_page} 页{suffix}")
 
     # Pagination controls
     cols = st.columns([1, 2, 1])
     with cols[0]:
-        if st.button("◀ 更新", disabled=(page <= 1)):
+        st.markdown("<style>[data-testid='column']:nth-child(1) div[data-testid='stButton'] button{width:100%}</style>", unsafe_allow_html=True)
+        if st.button("◀ 更新", disabled=(page <= 1), use_container_width=True):
             st.session_state.page = page - 1
             st.rerun()
     with cols[1]:
-        st.caption(f"显示第 {start + 1}–{min(start + page_size, total)} 条，共 {total} 条")
+        st.markdown(
+            f"<div style='text-align:center;font-size:0.76rem;color:#888;padding-top:0.4rem'>"
+            f"第 {page}/{max_page} 页 · {start + 1}–{min(start + page_size, total)} / {total} 条"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
     with cols[2]:
         at_last_loaded_page = page >= loaded_pages
         older_label = "⏳ 加载更多" if (at_last_loaded_page and not fully_loaded) else "更早 ▶"
-        if st.button(older_label, disabled=(page >= max_page)):
+        if st.button(older_label, disabled=(page >= max_page), use_container_width=True):
             if at_last_loaded_page and not fully_loaded:
                 st.session_state.file_cache = load_older_chunk(cache)
             st.session_state.page = page + 1
@@ -493,38 +519,24 @@ def main():
     # Header
     rel = os.path.relpath(selected_path, LOG_DIR)
     mtime = datetime.fromtimestamp(os.path.getmtime(selected_path), tz=TZ).strftime("%Y-%m-%d %H:%M:%S")
-    st.title(f"🦞 {rel}")
-    st.caption(f"最后修改: `{mtime}`  ·  路径: `{selected_path}`")
+    st.markdown(f"#### 🦞 `{rel}`")
     st.divider()
 
     # Tail-first load: on file change do a fast tail load; on rerun just append new lines
-    t0 = time.perf_counter()
     cache = st.session_state.get("file_cache", {})
     if cache.get("path") != selected_path:
         st.session_state.file_cache = tail_load(selected_path)
         st.session_state.page = 1
         st.session_state.last_new_count = 0
-        load_type = "tail_load"
     else:
         updated, new_count = append_new_lines(cache)
         st.session_state.file_cache = updated
         st.session_state.last_new_count = new_count
-        load_type = "append_new_lines"
-    t_parse = time.perf_counter() - t0
 
-    t1 = time.perf_counter()
     if not st.session_state.file_cache["records"]:
         st.warning("文件为空或不包含有效的 JSON 行。")
     else:
         render_session(page_size)
-    t_render = time.perf_counter() - t1
-
-    fc = st.session_state.file_cache
-    file_size = os.path.getsize(fc["path"]) if os.path.exists(fc["path"]) else -1
-    st.caption(
-        f"⏱ `{load_type}` {t_parse*1000:.1f}ms · render {t_render*1000:.1f}ms"
-        f" | 文件大小: {file_size}B · tail_offset: {fc['tail_offset']}B · 已加载: {len(fc['records'])} 条"
-    )
 
 
 if __name__ == "__main__":
