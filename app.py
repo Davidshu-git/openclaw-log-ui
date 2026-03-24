@@ -266,6 +266,32 @@ def render_assistant_message(record: dict, translate: bool = False):
             render_content_block(block, translate=translate)
 
 
+def _split_metadata(text: str) -> tuple[str, str, str]:
+    """Split into (before_meta, meta_block, after_meta).
+    Detects 'Conversation info (untrusted metadata):' injected by Telegram.
+    Both before and after text are shown; only the metadata block is folded."""
+    marker = "Conversation info (untrusted metadata):"
+    idx = text.find(marker)
+    if idx == -1:
+        return text, "", ""
+
+    before = text[:idx].strip()
+    rest = text[idx:]
+
+    # The metadata contains two ```json...``` fences (Conversation info + Sender).
+    # Split on ``` to find where metadata ends and user text resumes.
+    parts = rest.split("```")
+    if len(parts) >= 5:
+        # parts: [0]=intro, [1]=json1, [2]=between, [3]=json2, [4]=after
+        meta = "```".join(parts[:4]) + "```"
+        after = parts[4].strip()
+    else:
+        meta = rest
+        after = ""
+
+    return before, meta, after
+
+
 def render_user_message(record: dict):
     """Render a user message."""
     msg = record.get("message", {})
@@ -279,12 +305,26 @@ def render_user_message(record: dict):
             if isinstance(block, dict):
                 btype = block.get("type", "")
                 if btype == "text":
-                    st.markdown(block.get("text", ""))
+                    before, meta, after = _split_metadata(block.get("text", ""))
+                    if before:
+                        st.markdown(before)
+                    if meta:
+                        with st.expander("📋 消息元数据", expanded=False):
+                            st.code(meta, language="")
+                    if after:
+                        st.markdown(after)
                 else:
                     with st.expander(f"📦 {btype}", expanded=False):
                         st.code(json.dumps(block, indent=2, ensure_ascii=False), language="json")
             elif isinstance(block, str):
-                st.markdown(block)
+                before, meta, after = _split_metadata(block)
+                if before:
+                    st.markdown(before)
+                if meta:
+                    with st.expander("📋 消息元数据", expanded=False):
+                        st.code(meta, language="")
+                if after:
+                    st.markdown(after)
 
 
 def render_meta_record(record: dict):
