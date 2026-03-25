@@ -9,10 +9,10 @@ services:
     volumes:
       - ./app.py:/app/app.py:ro
       - ${OPENCLAW_SESSIONS_DIR:-~/.openclaw/agents/main/sessions}:/sessions:ro
-      # Uncomment to also expose cron run logs:
-      # - ${OPENCLAW_CRON_DIR:-~/.openclaw/cron/runs}:/sessions/cron-runs:ro
+      - ${OPENCLAW_CRON_DIR:-~/.openclaw/cron/runs}:/cron-runs:ro
     environment:
       - LOG_DIR=/sessions
+      - EXTRA_LOG_DIR=/cron-runs
       - AUTO_REFRESH_INTERVAL=5
     user: "${UID:-1000}:${GID:-1000}"
 

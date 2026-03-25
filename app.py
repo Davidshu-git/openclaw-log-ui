@@ -24,6 +24,7 @@ def translate_to_chinese(text: str) -> str:
 
 # ── Config ──────────────────────────────────────────────────────────────────
 LOG_DIR = os.environ.get("LOG_DIR", "./sessions")
+EXTRA_LOG_DIR = os.environ.get("EXTRA_LOG_DIR", "")  # optional second scan root
 AUTO_REFRESH_INTERVAL = int(os.environ.get("AUTO_REFRESH_INTERVAL", "5"))  # seconds
 CHUNK_BYTES = int(os.environ.get("CHUNK_BYTES", str(256 * 1024)))  # 256 KB per chunk
 
@@ -64,9 +65,8 @@ hr { margin: 0.4rem 0 !important; }
 def list_jsonl_files(log_dir: str) -> list[dict]:
     """Return list of dicts with path/name/mtime, sorted newest first."""
     pattern = os.path.join(log_dir, "**", "*.jsonl")
-    files = glob.glob(pattern, recursive=True)
     result = []
-    for f in files:
+    for f in glob.glob(pattern, recursive=True):
         try:
             mtime = os.path.getmtime(f)
             result.append({"path": f, "name": os.path.relpath(f, log_dir), "mtime": mtime})
@@ -409,29 +409,65 @@ def render_records(records: list[dict], translate: bool = False):
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
+SESSION_LIST_PAGE_SIZE = 5
+
+
 def sidebar() -> str | None:
     """Render sidebar and return selected file path (or None)."""
     with st.sidebar:
         st.markdown("### 🦞 OpenClaw 日志")
         st.divider()
 
-        files = list_jsonl_files(LOG_DIR)
+        log_mode = st.radio(
+            "日志类型",
+            ["💬 对话日志", "⏰ 定时任务"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="log_mode",
+        )
+        scan_dir = LOG_DIR if log_mode == "💬 对话日志" else EXTRA_LOG_DIR
+        if not scan_dir or (log_mode == "⏰ 定时任务" and not os.path.isdir(scan_dir)):
+            st.warning("定时任务日志目录未配置或不存在")
+            return None
+
+        files = list_jsonl_files(scan_dir)
         if not files:
             st.warning(f"在 `{LOG_DIR}` 中未找到 `.jsonl` 文件")
             return None
 
-        st.subheader(f"会话列表（{len(files)}）")
+        total = len(files)
+        total_pages = max(1, -(-total // SESSION_LIST_PAGE_SIZE))
+        sp = st.session_state.get("session_page", 1)
+        sp = max(1, min(sp, total_pages))
 
-        # Build display labels
-        options = {
-            f["name"]: f["path"]
-            for f in files
-        }
+        st.subheader(f"会话列表（{total}）")
+
+        # Pagination controls — only shown when there's more than one page
+        if total_pages > 1:
+            cols = st.columns([1, 2, 1])
+            with cols[0]:
+                if st.button("◀", disabled=(sp <= 1), use_container_width=True, key="sp_prev"):
+                    st.session_state.session_page = sp - 1
+                    st.rerun()
+            with cols[1]:
+                st.markdown(
+                    f"<div style='text-align:center;font-size:0.76rem;color:#888;padding-top:0.4rem'>"
+                    f"{sp} / {total_pages} 页</div>",
+                    unsafe_allow_html=True,
+                )
+            with cols[2]:
+                if st.button("▶", disabled=(sp >= total_pages), use_container_width=True, key="sp_next"):
+                    st.session_state.session_page = sp + 1
+                    st.rerun()
+
+        start = (sp - 1) * SESSION_LIST_PAGE_SIZE
+        page_files = files[start: start + SESSION_LIST_PAGE_SIZE]
+
+        options = {f["name"]: f["path"] for f in page_files}
         labels = list(options.keys())
 
-        # Format modified time for display
         def label_with_time(name):
-            f = next(x for x in files if x["name"] == name)
+            f = next(x for x in page_files if x["name"] == name)
             mtime_str = datetime.fromtimestamp(f["mtime"], tz=TZ).strftime("%m-%d %H:%M")
             return f"{name}  [{mtime_str}]"
 
@@ -450,6 +486,8 @@ def sidebar() -> str | None:
         page_size = 10
 
         return options.get(selected_label), auto_refresh, refresh_interval, page_size, translate
+
+
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -511,6 +549,12 @@ def main():
 
     selected_path, auto_refresh, refresh_interval, page_size, translate = result
     st.session_state.translate = translate
+
+    # Reset session list page when switching log mode
+    new_mode = st.session_state.get("log_mode")
+    if st.session_state.get("_prev_log_mode") != new_mode:
+        st.session_state.session_page = 1
+        st.session_state._prev_log_mode = new_mode
 
     if not selected_path:
         st.info("请从左侧选择一个会话。")
