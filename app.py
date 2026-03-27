@@ -76,6 +76,46 @@ def list_jsonl_files(log_dir: str) -> list[dict]:
     return result
 
 
+@st.cache_data(max_entries=500)
+def detect_session_type(filepath: str, mtime: float) -> str:
+    """Return 'main', 'cron', or 'subagent'. mtime is used as cache-invalidation key."""
+    try:
+        with open(filepath, "rb") as fh:
+            first_line = fh.readline().decode("utf-8", errors="replace").strip()
+            d = json.loads(first_line)
+            cwd = d.get("cwd", "")
+            if not cwd.endswith("/.openclaw/workspace"):
+                return "main"
+            for _ in range(60):
+                raw = fh.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if rec.get("type") == "message" and rec.get("message", {}).get("role") == "user":
+                        content = rec["message"]["content"]
+                        text = ""
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text = block["text"]
+                                    break
+                        elif isinstance(content, str):
+                            text = content
+                        return "cron" if "[cron:" in text else "subagent"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return "subagent"
+
+
+_TYPE_BADGE = {"main": "主", "cron": "C", "subagent": "子"}
+
+
 def _parse_range(fh, start: int, end: int) -> tuple[list[dict], int, int]:
     """Read lines from fh between [start, end) bytes. Returns (records, actual_start, actual_end)."""
     fh.seek(start)
@@ -435,6 +475,23 @@ def sidebar() -> str | None:
             st.warning(f"在 `{LOG_DIR}` 中未找到 `.jsonl` 文件")
             return None
 
+        # Type filter (only for conversation logs where all three types coexist)
+        file_types: dict[str, str] = {}
+        if log_mode == "💬 对话日志":
+            for f in files:
+                file_types[f["path"]] = detect_session_type(f["path"], f["mtime"])
+            _FILTER_OPTIONS = ["全部", "🏠 主会话", "⏰ Cron", "🤖 子Agent"]
+            _FILTER_MAP = {"全部": None, "🏠 主会话": "main", "⏰ Cron": "cron", "🤖 子Agent": "subagent"}
+            type_filter = st.selectbox(
+                "type_filter",
+                _FILTER_OPTIONS,
+                label_visibility="collapsed",
+                key="type_filter",
+            )
+            filter_key = _FILTER_MAP[type_filter]
+            if filter_key:
+                files = [f for f in files if file_types.get(f["path"]) == filter_key]
+
         total = len(files)
         total_pages = max(1, -(-total // SESSION_LIST_PAGE_SIZE))
         sp = st.session_state.get("session_page", 1)
@@ -469,7 +526,9 @@ def sidebar() -> str | None:
         def label_with_time(name):
             f = next(x for x in page_files if x["name"] == name)
             mtime_str = datetime.fromtimestamp(f["mtime"], tz=TZ).strftime("%m-%d %H:%M")
-            return f"{name}  [{mtime_str}]"
+            badge = _TYPE_BADGE.get(file_types.get(f["path"], ""), "")
+            prefix = f"[{badge}] " if badge else ""
+            return f"{prefix}{name}  [{mtime_str}]"
 
         selected_label = st.radio(
             "Select session",
@@ -550,11 +609,14 @@ def main():
     selected_path, auto_refresh, refresh_interval, page_size, translate = result
     st.session_state.translate = translate
 
-    # Reset session list page when switching log mode
+    # Reset session list page when switching log mode or type filter
     new_mode = st.session_state.get("log_mode")
-    if st.session_state.get("_prev_log_mode") != new_mode:
+    new_filter = st.session_state.get("type_filter", "全部")
+    if (st.session_state.get("_prev_log_mode") != new_mode
+            or st.session_state.get("_prev_type_filter") != new_filter):
         st.session_state.session_page = 1
         st.session_state._prev_log_mode = new_mode
+        st.session_state._prev_type_filter = new_filter
 
     if not selected_path:
         st.info("请从左侧选择一个会话。")
