@@ -332,21 +332,31 @@ def render_assistant_message(record: dict, translate: bool = False):
     ts = fmt_ts(record.get("timestamp", ""))
 
     with st.chat_message("assistant"):
-        # Header row: timestamp left, token stats right (small muted text)
+        # Header row: timestamp left, token pill or local badge right
         if usage and usage.get("input", 0):
-            inp  = _abbr(usage.get("input", 0))
-            out  = _abbr(usage.get("output", 0))
+            inp   = _abbr(usage.get("input", 0))
+            out   = _abbr(usage.get("output", 0))
             cache = usage.get("cacheRead", 0)
-            cache_str = f" cache:{_abbr(cache)}" if cache else ""
-            token_html = (
-                f"<span style='float:right;font-size:0.7rem;color:#888;line-height:1.6'>"
-                f"in:{inp} out:{out}{cache_str}"
+            cache_str = f" · cache:{_abbr(cache)}" if cache else ""
+            right_html = (
+                f"<span style='float:right;"
+                f"font-size:0.68rem;color:#4a9eff;"
+                f"background:rgba(74,158,255,0.1);border:1px solid rgba(74,158,255,0.25);"
+                f"border-radius:4px;padding:1px 6px;line-height:1.8'>"
+                f"in:{inp} · out:{out}{cache_str}"
                 f"</span>"
             )
-            ts_html = f"<span style='font-size:0.76rem;color:#888'>{ts}</span>" if ts else ""
-            st.markdown(f"{ts_html}{token_html}<div style='clear:both'></div>", unsafe_allow_html=True)
-        elif ts:
-            st.caption(ts)
+        else:
+            right_html = (
+                f"<span style='float:right;"
+                f"font-size:0.68rem;color:#999;"
+                f"background:rgba(150,150,150,0.1);border:1px solid rgba(150,150,150,0.2);"
+                f"border-radius:4px;padding:1px 6px;line-height:1.8'>"
+                f"⚙️ 本地"
+                f"</span>"
+            )
+        ts_html = f"<span style='font-size:0.76rem;color:#888'>{ts}</span>" if ts else ""
+        st.markdown(f"{ts_html}{right_html}<div style='clear:both'></div>", unsafe_allow_html=True)
         for block in content:
             render_content_block(block, translate=translate)
 
@@ -506,6 +516,7 @@ def sidebar() -> str | None:
             type_filter = st.selectbox(
                 "type_filter",
                 _FILTER_OPTIONS,
+                index=1,  # default to 🏠 主会话
                 label_visibility="collapsed",
                 key="type_filter",
             )
