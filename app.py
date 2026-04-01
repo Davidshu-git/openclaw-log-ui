@@ -1,7 +1,7 @@
 import os
 import json
 import glob
-from datetime import datetime, timezone, date as date_type
+from datetime import datetime, timezone, timedelta, date as date_type
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -28,6 +28,16 @@ LOG_DIR = os.environ.get("LOG_DIR", "./sessions")
 EXTRA_LOG_DIR = os.environ.get("EXTRA_LOG_DIR", "")  # optional second scan root
 AUTO_REFRESH_INTERVAL = int(os.environ.get("AUTO_REFRESH_INTERVAL", "5"))  # seconds
 CHUNK_BYTES = int(os.environ.get("CHUNK_BYTES", str(256 * 1024)))  # 256 KB per chunk
+
+
+def _session_files(log_dir: str) -> set[str]:
+    """Return all session file paths under log_dir: .jsonl, .jsonl.reset.*, .jsonl.deleted.*"""
+    patterns = [
+        os.path.join(log_dir, "**", "*.jsonl"),
+        os.path.join(log_dir, "**", "*.jsonl.reset.*"),
+        os.path.join(log_dir, "**", "*.jsonl.deleted.*"),
+    ]
+    return {f for p in patterns for f in glob.glob(p, recursive=True)}
 
 st.set_page_config(
     page_title="OpenClaw 日志查看器",
@@ -64,10 +74,10 @@ hr { margin: 0.4rem 0 !important; }
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def list_jsonl_files(log_dir: str) -> list[dict]:
-    """Return list of dicts with path/name/mtime, sorted newest first."""
-    pattern = os.path.join(log_dir, "**", "*.jsonl")
+    """Return list of dicts with path/name/mtime, sorted newest first.
+    Includes .jsonl, .jsonl.reset.*, and .jsonl.deleted.* files."""
     result = []
-    for f in glob.glob(pattern, recursive=True):
+    for f in _session_files(log_dir):
         try:
             mtime = os.path.getmtime(f)
             result.append({"path": f, "name": os.path.relpath(f, log_dir), "mtime": mtime})
@@ -115,6 +125,31 @@ def detect_session_type(filepath: str, mtime: float) -> str:
 
 
 _TYPE_BADGE = {"main": "主", "cron": "C", "subagent": "子"}
+
+
+def _fmt_file_label(name: str) -> str:
+    """Return a compact display name for a session file, handling reset/deleted suffixes."""
+    basename = os.path.basename(name)
+    uid = basename[:8]
+
+    def _parse_suffix_ts(suffix_str: str) -> str:
+        """Parse '2026-04-01T02-42-57.325Z' → '04-01 10:42' (Asia/Shanghai)."""
+        try:
+            # Time portion uses hyphens instead of colons: T02-42-57
+            date_part, time_part = suffix_str.split("T", 1)
+            time_part = time_part.replace("-", ":", 2).split(".")[0]  # HH:MM:SS
+            dt = datetime.fromisoformat(f"{date_part}T{time_part}+00:00").astimezone(TZ)
+            return dt.strftime("%m-%d %H:%M")
+        except Exception:
+            return ""
+
+    if ".reset." in basename:
+        ts = _parse_suffix_ts(basename.split(".reset.")[-1])
+        return f"{uid} ↩  [{ts}]" if ts else f"{uid} ↩reset"
+    if ".deleted." in basename:
+        ts = _parse_suffix_ts(basename.split(".deleted.")[-1])
+        return f"{uid} 🗑  [{ts}]" if ts else f"{uid} 🗑deleted"
+    return uid
 
 
 def _parse_range(fh, start: int, end: int) -> tuple[list[dict], int, int]:
@@ -319,7 +354,9 @@ def render_tool_result(record: dict):
 
 
 def _abbr(n: int) -> str:
-    """Abbreviate large token counts: 53168 → 53.2k, 423 → 423."""
+    """Abbreviate large token counts: 53168 → 53.2k, 1234567 → 1.2M, 423 → 423."""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
     if n >= 1000:
         return f"{n/1000:.1f}k"
     return str(n)
@@ -456,11 +493,11 @@ def render_meta_record(record: dict):
 
 @st.cache_data
 def scan_token_stats(fingerprint: str) -> list[dict]:
-    """Scan all .jsonl files in LOG_DIR and aggregate token usage by date (Asia/Shanghai).
+    """Scan all .jsonl / .jsonl.reset.* / .jsonl.deleted.* files in LOG_DIR and aggregate
+    token usage by date (Asia/Shanghai).
     fingerprint is a str of sorted (filename, size) tuples — used as cache key."""
-    pattern = os.path.join(LOG_DIR, "**", "*.jsonl")
     daily: dict[str, dict] = {}
-    for filepath in glob.glob(pattern, recursive=True):
+    for filepath in _session_files(LOG_DIR):
         try:
             with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
@@ -492,7 +529,7 @@ def scan_token_stats(fingerprint: str) -> list[dict]:
                     daily[day_str]["input"] += inp
                     daily[day_str]["output"] += out
                     daily[day_str]["cache_read"] += usage.get("cacheRead", 0)
-                    daily[day_str]["total"] += usage.get("totalTokens", 0) or (inp + out)
+                    daily[day_str]["total"] += inp + out + usage.get("cacheRead", 0) + usage.get("cacheWrite", 0)
                     daily[day_str]["calls"] += 1
         except Exception:
             continue
@@ -502,9 +539,8 @@ def scan_token_stats(fingerprint: str) -> list[dict]:
 def render_token_stats():
     """Render the Token Statistics tab."""
     # Build directory fingerprint for cache invalidation
-    pattern = os.path.join(LOG_DIR, "**", "*.jsonl")
     file_info = []
-    for f in glob.glob(pattern, recursive=True):
+    for f in _session_files(LOG_DIR):
         try:
             file_info.append((os.path.basename(f), os.path.getsize(f)))
         except OSError:
@@ -518,8 +554,8 @@ def render_token_stats():
         return
 
     today = datetime.now(tz=TZ).date()
-    # Week start: Monday
-    week_start = date_type.fromordinal(today.toordinal() - today.weekday())
+    day7_start  = today - timedelta(days=6)
+    day30_start = today - timedelta(days=29)
 
     def sum_period(predicate):
         totals = {"total": 0, "output": 0, "input": 0, "cache_read": 0, "calls": 0}
@@ -533,27 +569,28 @@ def render_token_stats():
                 totals["calls"]      += row["calls"]
         return totals
 
-    today_t  = sum_period(lambda d: d == today)
-    week_t   = sum_period(lambda d: week_start <= d <= today)
-    month_t  = sum_period(lambda d: d.year == today.year and d.month == today.month)
-    all_t    = sum_period(lambda d: True)
+    today_t = sum_period(lambda d: d == today)
+    week_t  = sum_period(lambda d: day7_start <= d <= today)
+    month_t = sum_period(lambda d: day30_start <= d <= today)
+    all_t   = sum_period(lambda d: True)
 
     # Top metric cards — show total, with output as sub-caption
     c1, c2, c3, c4 = st.columns(4)
     for col, label, t in [
         (c1, "今日", today_t),
-        (c2, "本周", week_t),
-        (c3, "本月", month_t),
+        (c2, "近 7 天", week_t),
+        (c3, "近 30 天", month_t),
         (c4, "全部时间", all_t),
     ]:
         with col:
-            st.metric(f"{label} Total Tokens", f"{t['total']:,}")
+            st.metric(f"{label} Total Tokens", _abbr(t['total']))
             st.caption(f"out:{t['output']:,}  ·  API {t['calls']} 次")
 
     st.divider()
 
-    # Stacked bar chart: recent 30 days, output / input / cache breakdown
-    chart_data = stats[-30:] if len(stats) > 30 else stats
+    # Stacked bar chart: recent 30 calendar days (consistent with metric cards)
+    day30_str = day30_start.isoformat()
+    chart_data = [row for row in stats if row["date"] >= day30_str]
     if chart_data:
         df_chart = (
             pd.DataFrame(chart_data)[["date", "output", "input", "cache_read"]]
@@ -689,7 +726,7 @@ def sidebar() -> str | None:
             mtime_str = datetime.fromtimestamp(f["mtime"], tz=TZ).strftime("%m-%d %H:%M")
             badge = _TYPE_BADGE.get(file_types.get(f["path"], ""), "")
             prefix = f"[{badge}] " if badge else ""
-            return f"{prefix}{name}  [{mtime_str}]"
+            return f"{prefix}{_fmt_file_label(name)}  [{mtime_str}]"
 
         selected_label = st.radio(
             "Select session",
@@ -785,7 +822,6 @@ def main():
 
     # Header
     rel = os.path.relpath(selected_path, LOG_DIR)
-    mtime = datetime.fromtimestamp(os.path.getmtime(selected_path), tz=TZ).strftime("%Y-%m-%d %H:%M:%S")
     st.markdown(f"#### 🦞 `{rel}`")
     st.divider()
 
