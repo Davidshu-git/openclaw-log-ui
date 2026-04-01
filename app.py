@@ -276,12 +276,14 @@ def render_content_block(block: dict, translate: bool = False):
     if btype == "text":
         text = block.get("text", "")
         if text.strip():
-            st.markdown(translate_to_chinese(text) if translate else text)
+            out = translate_to_chinese(text) if translate else text
+            st.markdown(_safe_str(out))
 
     elif btype == "thinking":
         thinking_text = block.get("thinking", "")
         with st.expander("💭 思考过程", expanded=True):
-            st.markdown(translate_to_chinese(thinking_text) if translate else thinking_text)
+            out = translate_to_chinese(thinking_text) if translate else thinking_text
+            st.markdown(_safe_str(out))
 
     elif btype == "toolCall":
         tool_name = block.get("name", "unknown")
@@ -399,6 +401,11 @@ def render_assistant_message(record: dict, translate: bool = False):
             render_content_block(block, translate=translate)
 
 
+def _safe_str(text: str) -> str:
+    """Remove lone surrogate characters that cause UnicodeEncodeError in Streamlit."""
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def _split_metadata(text: str) -> tuple[str, str, str]:
     """Split into (before_meta, meta_block, after_meta).
     Detects 'Conversation info (untrusted metadata):' injected by Telegram.
@@ -440,24 +447,24 @@ def render_user_message(record: dict):
                 if btype == "text":
                     before, meta, after = _split_metadata(block.get("text", ""))
                     if before:
-                        st.markdown(before)
+                        st.markdown(_safe_str(before))
                     if meta:
                         with st.expander("📋 消息元数据", expanded=False):
                             st.code(meta, language="")
                     if after:
-                        st.markdown(after)
+                        st.markdown(_safe_str(after))
                 else:
                     with st.expander(f"📦 {btype}", expanded=False):
                         st.code(json.dumps(block, indent=2, ensure_ascii=False), language="json")
             elif isinstance(block, str):
                 before, meta, after = _split_metadata(block)
                 if before:
-                    st.markdown(before)
+                    st.markdown(_safe_str(before))
                 if meta:
                     with st.expander("📋 消息元数据", expanded=False):
                         st.code(meta, language="")
                 if after:
-                    st.markdown(after)
+                    st.markdown(_safe_str(after))
 
 
 def render_meta_record(record: dict):
