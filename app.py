@@ -81,11 +81,7 @@ def detect_session_type(filepath: str, mtime: float) -> str:
     """Return 'main', 'cron', or 'subagent'. mtime is used as cache-invalidation key."""
     try:
         with open(filepath, "rb") as fh:
-            first_line = fh.readline().decode("utf-8", errors="replace").strip()
-            d = json.loads(first_line)
-            cwd = d.get("cwd", "")
-            if not cwd.endswith("/.openclaw/workspace"):
-                return "main"
+            fh.readline()  # skip first line (session metadata)
             for _ in range(60):
                 raw = fh.readline()
                 if not raw:
@@ -105,7 +101,11 @@ def detect_session_type(filepath: str, mtime: float) -> str:
                                     break
                         elif isinstance(content, str):
                             text = content
-                        return "cron" if "[cron:" in text else "subagent"
+                        if "Conversation info (untrusted metadata):" in text:
+                            return "main"
+                        if "[cron:" in text:
+                            return "cron"
+                        return "subagent"
                 except Exception:
                     pass
     except Exception:
@@ -317,14 +317,35 @@ def render_tool_result(record: dict):
             st.caption(f"调用 ID: `{tool_id}`")
 
 
+def _abbr(n: int) -> str:
+    """Abbreviate large token counts: 53168 → 53.2k, 423 → 423."""
+    if n >= 1000:
+        return f"{n/1000:.1f}k"
+    return str(n)
+
+
 def render_assistant_message(record: dict, translate: bool = False):
     """Render an assistant message — text visible, tool calls / thinking collapsible."""
     msg = record.get("message", {})
     content = msg.get("content", [])
+    usage = msg.get("usage", {})
     ts = fmt_ts(record.get("timestamp", ""))
 
     with st.chat_message("assistant"):
-        if ts:
+        # Header row: timestamp left, token stats right (small muted text)
+        if usage and usage.get("input", 0):
+            inp  = _abbr(usage.get("input", 0))
+            out  = _abbr(usage.get("output", 0))
+            cache = usage.get("cacheRead", 0)
+            cache_str = f" cache:{_abbr(cache)}" if cache else ""
+            token_html = (
+                f"<span style='float:right;font-size:0.7rem;color:#888;line-height:1.6'>"
+                f"in:{inp} out:{out}{cache_str}"
+                f"</span>"
+            )
+            ts_html = f"<span style='font-size:0.76rem;color:#888'>{ts}</span>" if ts else ""
+            st.markdown(f"{ts_html}{token_html}<div style='clear:both'></div>", unsafe_allow_html=True)
+        elif ts:
             st.caption(ts)
         for block in content:
             render_content_block(block, translate=translate)
