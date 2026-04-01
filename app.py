@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import glob
 from datetime import datetime, timezone, timedelta, date as date_type
@@ -88,8 +89,10 @@ def list_jsonl_files(log_dir: str) -> list[dict]:
 
 
 @st.cache_data(max_entries=500)
-def detect_session_type(filepath: str, mtime: float) -> str:
-    """Return 'main', 'cron', or 'subagent'. mtime is used as cache-invalidation key."""
+def detect_session_type(filepath: str, mtime: float) -> tuple[str, str]:
+    """Return (type, model_id). type is 'main', 'cron', or 'subagent'. mtime is cache-invalidation key."""
+    stype = ""
+    model_id = ""
     try:
         with open(filepath, "rb") as fh:
             fh.readline()  # skip first line (session metadata)
@@ -102,7 +105,16 @@ def detect_session_type(filepath: str, mtime: float) -> str:
                     continue
                 try:
                     rec = json.loads(line)
-                    if rec.get("type") == "message" and rec.get("message", {}).get("role") == "user":
+                    if rec.get("type") == "model_change" and not model_id:
+                        model_id = rec.get("modelId", "")
+                    if rec.get("type") == "message" and not model_id and rec.get("message", {}).get("role") == "assistant":
+                        for blk in rec.get("message", {}).get("content", []):
+                            if isinstance(blk, dict) and blk.get("type") == "text":
+                                m = _re_startup_model.search(blk["text"])
+                                if m:
+                                    model_id = m.group(1)
+                                break
+                    if not stype and rec.get("type") == "message" and rec.get("message", {}).get("role") == "user":
                         content = rec["message"]["content"]
                         text = ""
                         if isinstance(content, list):
@@ -113,43 +125,27 @@ def detect_session_type(filepath: str, mtime: float) -> str:
                         elif isinstance(content, str):
                             text = content
                         if "[cron:" in text:
-                            return "cron"
-                        if "[Subagent Context]" in text:
-                            return "subagent"
-                        return "main"
+                            stype = "cron"
+                        elif "[Subagent Context]" in text:
+                            stype = "subagent"
+                        else:
+                            stype = "main"
+                    if stype and model_id:
+                        break
                 except Exception:
                     pass
     except Exception:
         pass
-    return "subagent"
+    return stype or "subagent", model_id
 
 
 _TYPE_BADGE = {"main": "主", "cron": "C", "subagent": "子"}
+_re_startup_model = re.compile(r"model:\s*\S+/(\S+)")
 
 
 def _fmt_file_label(name: str) -> str:
-    """Return a compact display name for a session file, handling reset/deleted suffixes."""
-    basename = os.path.basename(name)
-    uid = basename[:8]
-
-    def _parse_suffix_ts(suffix_str: str) -> str:
-        """Parse '2026-04-01T02-42-57.325Z' → '04-01 10:42' (Asia/Shanghai)."""
-        try:
-            # Time portion uses hyphens instead of colons: T02-42-57
-            date_part, time_part = suffix_str.split("T", 1)
-            time_part = time_part.replace("-", ":", 2).split(".")[0]  # HH:MM:SS
-            dt = datetime.fromisoformat(f"{date_part}T{time_part}+00:00").astimezone(TZ)
-            return dt.strftime("%m-%d %H:%M")
-        except Exception:
-            return ""
-
-    if ".reset." in basename:
-        ts = _parse_suffix_ts(basename.split(".reset.")[-1])
-        return f"{uid} ↩  [{ts}]" if ts else f"{uid} ↩reset"
-    if ".deleted." in basename:
-        ts = _parse_suffix_ts(basename.split(".deleted.")[-1])
-        return f"{uid} 🗑  [{ts}]" if ts else f"{uid} 🗑deleted"
-    return uid
+    """Return the first 8 chars of the session UUID as a compact display name."""
+    return os.path.basename(name)[:8]
 
 
 def _parse_range(fh, start: int, end: int) -> tuple[list[dict], int, int]:
@@ -364,7 +360,7 @@ def _abbr(n: int) -> str:
     return str(n)
 
 
-def render_assistant_message(record: dict, translate: bool = False):
+def render_assistant_message(record: dict, translate: bool = False, model: str = ""):
     """Render an assistant message — text visible, tool calls / thinking collapsible."""
     msg = record.get("message", {})
     content = msg.get("content", [])
@@ -373,17 +369,19 @@ def render_assistant_message(record: dict, translate: bool = False):
 
     with st.chat_message("assistant"):
         # Header row: timestamp left, token pill or local badge right
+        model_str = f"{model} · " if model else ""
         if usage and usage.get("input", 0):
             inp   = _abbr(usage.get("input", 0))
             out   = _abbr(usage.get("output", 0))
             cache = usage.get("cacheRead", 0)
-            cache_str = f" · cache:{_abbr(cache)}" if cache else ""
+            total = usage.get("totalTokens", 0) or (usage.get("input", 0) + usage.get("output", 0) + cache + usage.get("cacheWrite", 0))
+            cache_str = f" · cache:{_abbr(cache)}"
             right_html = (
                 f"<span style='float:right;"
                 f"font-size:0.68rem;color:#4a9eff;"
                 f"background:rgba(74,158,255,0.1);border:1px solid rgba(74,158,255,0.25);"
                 f"border-radius:4px;padding:1px 6px;line-height:1.8'>"
-                f"in:{inp} · out:{out}{cache_str}"
+                f"{model_str}in:{inp} · out:{out}{cache_str} · total:{_abbr(total)}"
                 f"</span>"
             )
         else:
@@ -392,7 +390,7 @@ def render_assistant_message(record: dict, translate: bool = False):
                 f"font-size:0.68rem;color:#999;"
                 f"background:rgba(150,150,150,0.1);border:1px solid rgba(150,150,150,0.2);"
                 f"border-radius:4px;padding:1px 6px;line-height:1.8'>"
-                f"⚙️ 本地"
+                f"{model_str}⚙️ 本地"
                 f"</span>"
             )
         ts_html = f"<span style='font-size:0.76rem;color:#888'>{ts}</span>" if ts else ""
@@ -626,12 +624,18 @@ def render_token_stats():
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def render_records(records: list[dict], translate: bool = False):
+def render_records(records: list[dict], translate: bool = False, initial_model: str = ""):
     """Dispatch each record to the appropriate renderer."""
+    current_model = initial_model
     for record in records:
         if not isinstance(record, dict):
             continue
         rtype = record.get("type", "")
+
+        if rtype == "model_change":
+            current_model = record.get("modelId", current_model)
+            render_meta_record(record)
+            continue
 
         if rtype != "message":
             render_meta_record(record)
@@ -643,7 +647,15 @@ def render_records(records: list[dict], translate: bool = False):
         if role == "user":
             render_user_message(record)
         elif role == "assistant":
-            render_assistant_message(record, translate=translate)
+            # Try to pick up model from startup text if not yet known
+            if not current_model:
+                for blk in msg.get("content", []):
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        m = _re_startup_model.search(blk["text"])
+                        if m:
+                            current_model = m.group(1)
+                        break
+            render_assistant_message(record, translate=translate, model=current_model)
         elif role == "toolResult":
             render_tool_result(record)
         else:
@@ -680,7 +692,7 @@ def sidebar() -> str | None:
             return None
 
         # Type filter (only for conversation logs where all three types coexist)
-        file_types: dict[str, str] = {}
+        file_types: dict[str, tuple[str, str]] = {}  # path -> (type, model_id)
         if log_mode == "💬 对话日志":
             for f in files:
                 file_types[f["path"]] = detect_session_type(f["path"], f["mtime"])
@@ -695,7 +707,7 @@ def sidebar() -> str | None:
             )
             filter_key = _FILTER_MAP[type_filter]
             if filter_key:
-                files = [f for f in files if file_types.get(f["path"]) == filter_key]
+                files = [f for f in files if file_types.get(f["path"], ("", ""))[0] == filter_key]
 
         total = len(files)
         total_pages = max(1, -(-total // SESSION_LIST_PAGE_SIZE))
@@ -731,9 +743,7 @@ def sidebar() -> str | None:
         def label_with_time(name):
             f = next(x for x in page_files if x["name"] == name)
             mtime_str = datetime.fromtimestamp(f["mtime"], tz=TZ).strftime("%m-%d %H:%M")
-            badge = _TYPE_BADGE.get(file_types.get(f["path"], ""), "")
-            prefix = f"[{badge}] " if badge else ""
-            return f"{prefix}{_fmt_file_label(name)}  [{mtime_str}]"
+            return f"{_fmt_file_label(name)}  [{mtime_str}]"
 
         selected_label = st.radio(
             "Select session",
@@ -756,7 +766,7 @@ def sidebar() -> str | None:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def render_session(page_size: int):
+def render_session(page_size: int, initial_model: str = ""):
     cache = st.session_state.file_cache
     records = cache["records"]
     total = len(records)
@@ -798,7 +808,7 @@ def render_session(page_size: int):
             st.session_state.page = page + 1
             st.rerun()
 
-    render_records(visible, translate=st.session_state.get("translate", True))
+    render_records(visible, translate=st.session_state.get("translate", True), initial_model=initial_model)
 
 
 
@@ -849,7 +859,9 @@ def main():
         if not st.session_state.file_cache["records"]:
             st.warning("文件为空或不包含有效的 JSON 行。")
         else:
-            render_session(page_size)
+            mtime = os.path.getmtime(selected_path)
+            _, initial_model = detect_session_type(selected_path, mtime)
+            render_session(page_size, initial_model=initial_model)
 
     with tab_stats:
         render_token_stats()
