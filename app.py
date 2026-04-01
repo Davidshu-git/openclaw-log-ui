@@ -1,12 +1,13 @@
 import os
 import json
 import glob
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_type
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
 TZ = ZoneInfo("Asia/Shanghai")
 
+import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from deep_translator import GoogleTranslator
@@ -453,6 +454,134 @@ def render_meta_record(record: dict):
             st.code(json.dumps(record, indent=2, ensure_ascii=False), language="json")
 
 
+@st.cache_data
+def scan_token_stats(fingerprint: str) -> list[dict]:
+    """Scan all .jsonl files in LOG_DIR and aggregate token usage by date (Asia/Shanghai).
+    fingerprint is a str of sorted (filename, size) tuples — used as cache key."""
+    pattern = os.path.join(LOG_DIR, "**", "*.jsonl")
+    daily: dict[str, dict] = {}
+    for filepath in glob.glob(pattern, recursive=True):
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if rec.get("type") != "message":
+                        continue
+                    msg = rec.get("message", {})
+                    if msg.get("role") != "assistant":
+                        continue
+                    usage = msg.get("usage", {})
+                    if not usage or not usage.get("input", 0):
+                        continue
+                    ts_str = rec.get("timestamp", "")
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        day_str = dt.astimezone(TZ).strftime("%Y-%m-%d")
+                    except Exception:
+                        continue
+                    if day_str not in daily:
+                        daily[day_str] = {"date": day_str, "input": 0, "output": 0, "cache_read": 0, "total": 0, "calls": 0}
+                    inp = usage.get("input", 0)
+                    out = usage.get("output", 0)
+                    daily[day_str]["input"] += inp
+                    daily[day_str]["output"] += out
+                    daily[day_str]["cache_read"] += usage.get("cacheRead", 0)
+                    daily[day_str]["total"] += usage.get("totalTokens", 0) or (inp + out)
+                    daily[day_str]["calls"] += 1
+        except Exception:
+            continue
+    return sorted(daily.values(), key=lambda x: x["date"])
+
+
+def render_token_stats():
+    """Render the Token Statistics tab."""
+    # Build directory fingerprint for cache invalidation
+    pattern = os.path.join(LOG_DIR, "**", "*.jsonl")
+    file_info = []
+    for f in glob.glob(pattern, recursive=True):
+        try:
+            file_info.append((os.path.basename(f), os.path.getsize(f)))
+        except OSError:
+            pass
+    fingerprint = str(sorted(file_info))
+
+    stats = scan_token_stats(fingerprint)
+
+    if not stats:
+        st.info("暂无 Token 使用数据。请确保 sessions 目录下有含有 usage 字段的会话日志。")
+        return
+
+    today = datetime.now(tz=TZ).date()
+    # Week start: Monday
+    week_start = date_type.fromordinal(today.toordinal() - today.weekday())
+
+    def sum_period(predicate):
+        totals = {"total": 0, "output": 0, "input": 0, "cache_read": 0, "calls": 0}
+        for row in stats:
+            d = date_type.fromisoformat(row["date"])
+            if predicate(d):
+                totals["total"]      += row["total"]
+                totals["output"]     += row["output"]
+                totals["input"]      += row["input"]
+                totals["cache_read"] += row["cache_read"]
+                totals["calls"]      += row["calls"]
+        return totals
+
+    today_t  = sum_period(lambda d: d == today)
+    week_t   = sum_period(lambda d: week_start <= d <= today)
+    month_t  = sum_period(lambda d: d.year == today.year and d.month == today.month)
+    all_t    = sum_period(lambda d: True)
+
+    # Top metric cards — show total, with output as sub-caption
+    c1, c2, c3, c4 = st.columns(4)
+    for col, label, t in [
+        (c1, "今日", today_t),
+        (c2, "本周", week_t),
+        (c3, "本月", month_t),
+        (c4, "全部时间", all_t),
+    ]:
+        with col:
+            st.metric(f"{label} Total Tokens", f"{t['total']:,}")
+            st.caption(f"out:{t['output']:,}  ·  API {t['calls']} 次")
+
+    st.divider()
+
+    # Stacked bar chart: recent 30 days, output / input / cache breakdown
+    chart_data = stats[-30:] if len(stats) > 30 else stats
+    if chart_data:
+        df_chart = (
+            pd.DataFrame(chart_data)[["date", "output", "input", "cache_read"]]
+            .rename(columns={"output": "输出", "input": "输入", "cache_read": "缓存命中"})
+            .set_index("date")
+        )
+        st.caption("近 30 天每日 Token 构成（输出 / 输入 / 缓存命中）")
+        st.bar_chart(df_chart, y=["输出", "输入", "缓存命中"])
+
+    st.divider()
+
+    # Detail table sorted newest-first
+    if stats:
+        df = pd.DataFrame(list(reversed(stats)))
+        df = df.rename(columns={
+            "date": "日期",
+            "input": "输入",
+            "output": "输出",
+            "cache_read": "缓存命中",
+            "total": "总计",
+            "calls": "调用次数",
+        })
+        # Format numeric columns with thousands separator
+        for col in ["输入", "输出", "缓存命中", "总计", "调用次数"]:
+            df[col] = df[col].apply(lambda x: f"{x:,}")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
 def render_records(records: list[dict], translate: bool = False):
     """Dispatch each record to the appropriate renderer."""
     for record in records:
@@ -671,10 +800,16 @@ def main():
         st.session_state.file_cache = updated
         st.session_state.last_new_count = new_count
 
-    if not st.session_state.file_cache["records"]:
-        st.warning("文件为空或不包含有效的 JSON 行。")
-    else:
-        render_session(page_size)
+    tab_log, tab_stats = st.tabs(["💬 会话日志", "📊 Token 统计"])
+
+    with tab_log:
+        if not st.session_state.file_cache["records"]:
+            st.warning("文件为空或不包含有效的 JSON 行。")
+        else:
+            render_session(page_size)
+
+    with tab_stats:
+        render_token_stats()
 
 
 if __name__ == "__main__":
