@@ -102,11 +102,11 @@ def detect_session_type(filepath: str, mtime: float) -> str:
                                     break
                         elif isinstance(content, str):
                             text = content
-                        if "Conversation info (untrusted metadata):" in text:
-                            return "main"
                         if "[cron:" in text:
                             return "cron"
-                        return "subagent"
+                        if "[Subagent Context]" in text:
+                            return "subagent"
+                        return "main"
                 except Exception:
                     pass
     except Exception:
