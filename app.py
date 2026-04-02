@@ -781,8 +781,12 @@ def render_records(records: list[dict], translate: bool = False, initial_model: 
         if role == "user":
             render_user_message(record)
         elif role == "assistant":
-            # Try to pick up model from startup text if not yet known
-            if not current_model:
+            # Prefer message.model (actual model used) over initial_model heuristic
+            msg_model = msg.get("model", "")
+            if msg_model:
+                current_model = msg_model.split("/")[-1]  # strip provider prefix
+            elif not current_model:
+                # Fallback: scan startup text (less reliable, kept for legacy sessions)
                 for blk in msg.get("content", []):
                     if isinstance(blk, dict) and blk.get("type") == "text":
                         m = _re_startup_model.search(blk["text"])
