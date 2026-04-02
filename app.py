@@ -496,15 +496,43 @@ def render_meta_record(record: dict):
             st.code(json.dumps(record, indent=2, ensure_ascii=False), language="json")
 
 
+def _empty_usage_row(date: str) -> dict:
+    """返回一条空白的日期统计行模板（包含 by_model 字典）。"""
+    return {"date": date, "input": 0, "output": 0, "cache_read": 0, "total": 0, "calls": 0, "by_model": {}}
+
+
+def _add_usage_to(row: dict, inp: int, out: int, cache_r: int, cache_w: int) -> None:
+    """将本次 usage 累加到 row 的顶层字段（in-place）。"""
+    row["input"]      += inp
+    row["output"]     += out
+    row["cache_read"] += cache_r
+    row["total"]      += inp + out + cache_r + cache_w
+    row["calls"]      += 1
+
+
+def _add_usage_to_model(row: dict, model: str, inp: int, out: int, cache_r: int, cache_w: int) -> None:
+    """将本次 usage 累加到 row["by_model"][model]（in-place）。"""
+    bm = row["by_model"]
+    if model not in bm:
+        bm[model] = {"input": 0, "output": 0, "cache_read": 0, "total": 0, "calls": 0}
+    bm[model]["input"]      += inp
+    bm[model]["output"]     += out
+    bm[model]["cache_read"] += cache_r
+    bm[model]["total"]      += inp + out + cache_r + cache_w
+    bm[model]["calls"]      += 1
+
+
 @st.cache_data
 def scan_token_stats(fingerprint: str) -> list[dict]:
     """Scan all .jsonl / .jsonl.reset.* / .jsonl.deleted.* files in LOG_DIR and aggregate
     token usage by date (Asia/Shanghai).
+    每条日期记录同时包含 by_model 字典以便按模型过滤。
     fingerprint is a str of sorted (filename, size) tuples — used as cache key."""
     daily: dict[str, dict] = {}
     for filepath in _session_files(LOG_DIR):
         try:
             with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                current_model: str = ""  # 在同一文件中跟踪当前模型
                 for line in fh:
                     line = line.strip()
                     if not line:
@@ -513,7 +541,12 @@ def scan_token_stats(fingerprint: str) -> list[dict]:
                         rec = json.loads(line)
                     except Exception:
                         continue
-                    if rec.get("type") != "message":
+                    rtype = rec.get("type", "")
+                    # 追踪 model_change 事件以便无 message.model 字段时回退
+                    if rtype == "model_change":
+                        current_model = rec.get("modelId", current_model)
+                        continue
+                    if rtype != "message":
                         continue
                     msg = rec.get("message", {})
                     if msg.get("role") != "assistant":
@@ -528,14 +561,16 @@ def scan_token_stats(fingerprint: str) -> list[dict]:
                     except Exception:
                         continue
                     if day_str not in daily:
-                        daily[day_str] = {"date": day_str, "input": 0, "output": 0, "cache_read": 0, "total": 0, "calls": 0}
-                    inp = usage.get("input", 0)
-                    out = usage.get("output", 0)
-                    daily[day_str]["input"] += inp
-                    daily[day_str]["output"] += out
-                    daily[day_str]["cache_read"] += usage.get("cacheRead", 0)
-                    daily[day_str]["total"] += inp + out + usage.get("cacheRead", 0) + usage.get("cacheWrite", 0)
-                    daily[day_str]["calls"] += 1
+                        daily[day_str] = _empty_usage_row(day_str)
+                    inp     = usage.get("input", 0)
+                    out     = usage.get("output", 0)
+                    cache_r = usage.get("cacheRead", 0)
+                    cache_w = usage.get("cacheWrite", 0)
+                    # 累加顶层（向后兼容）
+                    _add_usage_to(daily[day_str], inp, out, cache_r, cache_w)
+                    # 识别模型：优先使用 message.model，其次回退到 current_model
+                    model_name = msg.get("model", "") or current_model or "unknown"
+                    _add_usage_to_model(daily[day_str], model_name, inp, out, cache_r, cache_w)
         except Exception:
             continue
     return sorted(daily.values(), key=lambda x: x["date"])
@@ -621,7 +656,106 @@ def render_token_stats():
         # Format numeric columns with thousands separator
         for col in ["输入", "输出", "缓存命中", "总计", "调用次数"]:
             df[col] = df[col].apply(lambda x: f"{x:,}")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df[["日期", "输入", "输出", "缓存命中", "总计", "调用次数"]], use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── 按模型视图 ─────────────────────────────────────────────────────────────
+    st.subheader("🤖 按模型统计")
+
+    # 收集所有出现的模型名
+    all_models: set[str] = set()
+    for row in stats:
+        all_models.update(row.get("by_model", {}).keys())
+    all_models_sorted = sorted(all_models)
+
+    if not all_models_sorted:
+        st.info("暂无模型数据。")
+    else:
+        model_options = ["全部模型"] + all_models_sorted
+        selected_model = st.selectbox(
+            "选择模型",
+            model_options,
+            index=0,
+            key="token_model_filter",
+        )
+
+        def _model_row_stats(row: dict, model: str | None) -> dict:
+            """从 daily 行中提取指定模型（None 表示全部）的 usage dict。"""
+            if model is None:
+                return row
+            return row.get("by_model", {}).get(model, {
+                "input": 0, "output": 0, "cache_read": 0, "total": 0, "calls": 0,
+            })
+
+        filter_model = None if selected_model == "全部模型" else selected_model
+
+        # 过滤后的 metric 卡片
+        def sum_period_model(predicate, model: str | None) -> dict:
+            totals = {"total": 0, "output": 0, "input": 0, "cache_read": 0, "calls": 0}
+            for row in stats:
+                d = date_type.fromisoformat(row["date"])
+                if predicate(d):
+                    mr = _model_row_stats(row, model)
+                    totals["total"]      += mr.get("total", 0)
+                    totals["output"]     += mr.get("output", 0)
+                    totals["input"]      += mr.get("input", 0)
+                    totals["cache_read"] += mr.get("cache_read", 0)
+                    totals["calls"]      += mr.get("calls", 0)
+            return totals
+
+        m_today = sum_period_model(lambda d: d == today, filter_model)
+        m_week  = sum_period_model(lambda d: day7_start <= d <= today, filter_model)
+        m_month = sum_period_model(lambda d: day30_start <= d <= today, filter_model)
+        m_all   = sum_period_model(lambda d: True, filter_model)
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        for col, label, t in [
+            (mc1, "今日", m_today),
+            (mc2, "近 7 天", m_week),
+            (mc3, "近 30 天", m_month),
+            (mc4, "全部时间", m_all),
+        ]:
+            with col:
+                st.metric(f"{label} Total", _abbr(t["total"]))
+                st.caption(f"out:{t['output']:,}  ·  {t['calls']} 次")
+
+        # 近 30 天图表（按所选模型过滤）
+        model_chart_data = []
+        for row in stats:
+            if row["date"] < day30_str:
+                continue
+            mr = _model_row_stats(row, filter_model)
+            model_chart_data.append({
+                "date": row["date"],
+                "输出": mr.get("output", 0),
+                "输入": mr.get("input", 0),
+                "缓存命中": mr.get("cache_read", 0),
+            })
+        if model_chart_data:
+            df_mchart = pd.DataFrame(model_chart_data).set_index("date")
+            label_suffix = f"（{selected_model}）" if filter_model else ""
+            st.caption(f"近 30 天每日 Token 构成{label_suffix}")
+            st.bar_chart(df_mchart, y=["输出", "输入", "缓存命中"])
+
+        # 明细表（按所选模型过滤）
+        model_table_rows = []
+        for row in reversed(stats):
+            mr = _model_row_stats(row, filter_model)
+            if mr.get("calls", 0) == 0:
+                continue
+            model_table_rows.append({
+                "日期": row["date"],
+                "输入": f"{mr.get('input', 0):,}",
+                "输出": f"{mr.get('output', 0):,}",
+                "缓存命中": f"{mr.get('cache_read', 0):,}",
+                "总计": f"{mr.get('total', 0):,}",
+                "调用次数": f"{mr.get('calls', 0):,}",
+            })
+        if model_table_rows:
+            st.dataframe(pd.DataFrame(model_table_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info(f"所选模型「{selected_model}」在当前数据中无记录。")
 
 
 def render_records(records: list[dict], translate: bool = False, initial_model: str = ""):
