@@ -877,6 +877,17 @@ def sidebar() -> str | None:
         def label_with_time(name):
             f = next(x for x in page_files if x["name"] == name)
             mtime_str = datetime.fromtimestamp(f["mtime"], tz=TZ).strftime("%m-%d %H:%M")
+            stype, model_id = file_types.get(f["path"], ("", ""))
+            # Shorten model_id: strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
+            model_short = model_id.split("/")[-1] if model_id else ""
+            type_badge = _TYPE_BADGE.get(stype, "")
+            pill = ""
+            if type_badge:
+                pill += f"[{type_badge}]"
+            if model_short:
+                pill += f" {model_short}" if pill else model_short
+            if pill:
+                return f"{_fmt_file_label(name)}  {pill}  [{mtime_str}]"
             return f"{_fmt_file_label(name)}  [{mtime_str}]"
 
         selected_label = st.radio(
