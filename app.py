@@ -360,12 +360,30 @@ def _abbr(n: int) -> str:
     return str(n)
 
 
-def render_assistant_message(record: dict, translate: bool = False, model: str = ""):
+def _fmt_duration(ms: float) -> str:
+    """Format milliseconds into a human-readable duration string."""
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    if ms < 60_000:
+        return f"{ms / 1000:.1f}s"
+    m = int(ms // 60_000)
+    s = int((ms % 60_000) // 1000)
+    return f"{m}m{s:02d}s"
+
+
+def render_assistant_message(record: dict, translate: bool = False, model: str = "", duration_ms: float | None = None):
     """Render an assistant message — text visible, tool calls / thinking collapsible."""
     msg = record.get("message", {})
     content = msg.get("content", [])
     usage = msg.get("usage", {})
     ts = fmt_ts(record.get("timestamp", ""))
+
+    duration_html = ""
+    if duration_ms is not None and duration_ms >= 0:
+        duration_html = (
+            f"<span style='font-size:0.72rem;color:#f0a030;"
+            f"margin-left:6px'>⏱ {_fmt_duration(duration_ms)}</span>"
+        )
 
     with st.chat_message("assistant"):
         # Header row: timestamp left, token pill or local badge right
@@ -394,7 +412,7 @@ def render_assistant_message(record: dict, translate: bool = False, model: str =
                 f"</span>"
             )
         ts_html = f"<span style='font-size:0.76rem;color:#888'>{ts}</span>" if ts else ""
-        st.markdown(f"{ts_html}{right_html}<div style='clear:both'></div>", unsafe_allow_html=True)
+        st.markdown(f"{ts_html}{duration_html}{right_html}<div style='clear:both'></div>", unsafe_allow_html=True)
         for block in content:
             render_content_block(block, translate=translate)
 
@@ -774,7 +792,8 @@ def render_token_stats():
             st.info(f"所选模型「{filter_model}」在当前数据中无记录。")
 
 
-def render_records(records: list[dict], translate: bool = False, initial_model: str = ""):
+def render_records(records: list[dict], translate: bool = False, initial_model: str = "",
+                   durations: dict | None = None):
     """Dispatch each record to the appropriate renderer."""
     current_model = initial_model
     for record in records:
@@ -809,7 +828,8 @@ def render_records(records: list[dict], translate: bool = False, initial_model: 
                         if m:
                             current_model = m.group(1)
                         break
-            render_assistant_message(record, translate=translate, model=current_model)
+            dur = durations.get(record.get("id")) if durations else None
+            render_assistant_message(record, translate=translate, model=current_model, duration_ms=dur)
         elif role == "toolResult":
             render_tool_result(record)
         else:
@@ -932,6 +952,26 @@ def render_session(page_size: int, initial_model: str = ""):
     max_page = loaded_pages if fully_loaded else loaded_pages + 1
     page = min(page, max_page)
 
+    # Pre-compute API call durations (chronological order, id → ms)
+    durations: dict[str, float] = {}
+    prev_ts_raw = ""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        ts_raw = rec.get("timestamp", "")
+        msg = rec.get("message", {}) if rec.get("type") == "message" else {}
+        if msg.get("role") == "assistant" and prev_ts_raw and ts_raw:
+            try:
+                t0 = datetime.fromisoformat(prev_ts_raw.replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                ms = (t1 - t0).total_seconds() * 1000
+                if ms >= 0:
+                    durations[rec["id"]] = ms
+            except Exception:
+                pass
+        if ts_raw:
+            prev_ts_raw = ts_raw
+
     # Newest-first slice
     reversed_records = list(reversed(records))
     start = (page - 1) * page_size
@@ -962,7 +1002,7 @@ def render_session(page_size: int, initial_model: str = ""):
             st.session_state.page = page + 1
             st.rerun()
 
-    render_records(visible, translate=st.session_state.get("translate", True), initial_model=initial_model)
+    render_records(visible, translate=st.session_state.get("translate", True), initial_model=initial_model, durations=durations)
 
 
 
