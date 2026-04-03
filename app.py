@@ -2,6 +2,7 @@ import os
 import re
 import json
 import glob
+import time
 from datetime import datetime, timezone, timedelta, date as date_type
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -49,6 +50,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+
 /* 减少主区域顶部空白 */
 .block-container { padding-top: 1rem !important; padding-bottom: 0.5rem !important; }
 
@@ -792,6 +794,188 @@ def render_token_stats():
             st.info(f"所选模型「{filter_model}」在当前数据中无记录。")
 
 
+@st.cache_data(max_entries=1)
+def scan_subagent_sessions(fingerprint: str) -> list[dict]:
+    """Scan all session files and return subagent session metadata."""
+    results = []
+    for filepath in _session_files(LOG_DIR):
+        try:
+            fname = os.path.basename(filepath)
+            mtime = os.path.getmtime(filepath)
+
+            if ".jsonl.deleted." in fname:
+                file_status = "已删除"
+            elif ".jsonl.reset." in fname:
+                file_status = "已压缩"
+            else:
+                file_status = "运行中" if (time.time() - mtime) < 300 else "完成"
+
+            session_id = fname.split(".jsonl")[0]
+
+            task = ""
+            depth = ""
+            model = ""
+            start_time = ""
+            last_time = ""
+            api_calls = 0
+            total_tokens = 0
+            is_subagent = False
+            checked_type = False
+
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    ts = rec.get("timestamp", "")
+                    if ts:
+                        if not start_time:
+                            start_time = ts
+                        last_time = ts
+                    rtype = rec.get("type", "")
+                    if rtype == "model_change" and not model:
+                        model = rec.get("modelId", "")
+                        continue
+                    if rtype != "message":
+                        continue
+                    msg = rec.get("message", {})
+                    role = msg.get("role", "")
+                    if role == "user" and not checked_type:
+                        checked_type = True
+                        content = msg.get("content", [])
+                        text = ""
+                        if isinstance(content, list):
+                            for b in content:
+                                if isinstance(b, dict) and b.get("type") == "text":
+                                    text = b["text"]
+                                    break
+                        else:
+                            text = str(content)
+                        if "[Subagent Context]" not in text:
+                            break  # not a subagent
+                        is_subagent = True
+                        m = re.search(r"\(depth (\d+/\d+)\)", text)
+                        depth = m.group(1) if m else ""
+                        idx = text.find("[Subagent Task]:")
+                        if idx >= 0:
+                            task = text[idx + len("[Subagent Task]:"):].strip()
+                            task = task.split("\n")[0].strip()[:150]
+                    elif role == "assistant" and is_subagent:
+                        if not model:
+                            model = msg.get("model", "").split("/")[-1]
+                        usage = msg.get("usage", {})
+                        if usage.get("input", 0):
+                            api_calls += 1
+                            total_tokens += (usage.get("input", 0) + usage.get("output", 0)
+                                             + usage.get("cacheRead", 0) + usage.get("cacheWrite", 0))
+
+            if not is_subagent:
+                continue
+
+            duration_s = 0
+            if start_time and last_time:
+                try:
+                    t0 = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                    t1 = datetime.fromisoformat(last_time.replace("Z", "+00:00"))
+                    duration_s = max(0, int((t1 - t0).total_seconds()))
+                except Exception:
+                    pass
+
+            results.append({
+                "session_id": session_id,
+                "start_time": start_time,
+                "last_time": last_time,
+                "status": file_status,
+                "task": task or "(无任务描述)",
+                "depth": depth,
+                "model": model,
+                "api_calls": api_calls,
+                "total_tokens": total_tokens,
+                "duration_s": duration_s,
+            })
+        except Exception:
+            continue
+    results.sort(key=lambda x: x["start_time"], reverse=True)
+    return results
+
+
+def _fmt_duration_s(s: int) -> str:
+    if s >= 3600:
+        return f"{s // 3600}h{(s % 3600) // 60}m"
+    if s >= 60:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s}s"
+
+
+def render_subagent_status():
+    """Render the Subagent Status tab."""
+    file_info = []
+    for f in _session_files(LOG_DIR):
+        try:
+            file_info.append((os.path.basename(f), os.path.getsize(f)))
+        except OSError:
+            pass
+    fingerprint = str(sorted(file_info))
+    sessions = scan_subagent_sessions(fingerprint)
+
+    if not sessions:
+        st.info("暂无子 Agent 会话记录。")
+        return
+
+    total = len(sessions)
+    running = sum(1 for s in sessions if s["status"] == "运行中")
+    total_calls = sum(s["api_calls"] for s in sessions)
+    total_tok = sum(s["total_tokens"] for s in sessions)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("子 Agent 总数", f"{total:,}")
+    with c2:
+        st.metric("运行中", running)
+    with c3:
+        st.metric("累计 API 调用", f"{total_calls:,}")
+    with c4:
+        st.metric("累计 Tokens", _abbr(total_tok))
+
+    st.divider()
+
+    status_options = ["全部", "运行中", "完成", "已压缩", "已删除"]
+    status_filter = st.selectbox("状态筛选", status_options, index=0, key="subagent_status_filter")
+    filtered = sessions if status_filter == "全部" else [s for s in sessions if s["status"] == status_filter]
+
+    if not filtered:
+        st.info(f"没有「{status_filter}」状态的子 Agent。")
+        return
+
+    rows = []
+    for s in filtered:
+        start_fmt = ""
+        if s["start_time"]:
+            try:
+                dt = datetime.fromisoformat(s["start_time"].replace("Z", "+00:00"))
+                start_fmt = dt.astimezone(TZ).strftime("%m-%d %H:%M:%S")
+            except Exception:
+                pass
+        rows.append({
+            "开始时间": start_fmt,
+            "耗时(s)": s["duration_s"],
+            "状态": s["status"],
+            "模型": s["model"],
+            "API 调用": s["api_calls"],
+            "Tokens": _abbr(s["total_tokens"]),
+            "任务": s["task"],
+            "Session ID": s["session_id"][:8],
+            "深度": s["depth"],
+        })
+
+    st.caption(f"共 {len(filtered)} 条 · {status_filter}")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_records(records: list[dict], translate: bool = False, initial_model: str = "",
                    durations: dict | None = None):
     """Dispatch each record to the appropriate renderer."""
@@ -1047,7 +1231,7 @@ def main():
         st.session_state.file_cache = updated
         st.session_state.last_new_count = new_count
 
-    tab_log, tab_stats = st.tabs(["💬 会话日志", "📊 Token 统计"])
+    tab_log, tab_stats, tab_agents = st.tabs(["💬 会话日志", "📊 Token 统计", "🤖 子 Agent"])
 
     with tab_log:
         if not st.session_state.file_cache["records"]:
@@ -1059,6 +1243,9 @@ def main():
 
     with tab_stats:
         render_token_stats()
+
+    with tab_agents:
+        render_subagent_status()
 
 
 if __name__ == "__main__":
