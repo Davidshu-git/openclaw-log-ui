@@ -663,22 +663,38 @@ def render_token_stats():
     # ── 按模型视图 ─────────────────────────────────────────────────────────────
     st.subheader("🤖 按模型统计")
 
-    # 收集所有出现的模型名
-    all_models: set[str] = set()
+    # 收集所有模型及其全时段调用总量和 token 总量，按调用量降序排序
+    model_calls: dict[str, int] = {}
+    model_tokens: dict[str, int] = {}
     for row in stats:
-        all_models.update(row.get("by_model", {}).keys())
-    all_models_sorted = sorted(all_models)
+        for m, mu in row.get("by_model", {}).items():
+            model_calls[m]  = model_calls.get(m, 0)  + mu.get("calls", 0)
+            model_tokens[m] = model_tokens.get(m, 0) + mu.get("total", 0)
+    all_models_sorted = sorted(model_calls, key=lambda m: model_calls[m], reverse=True)
 
     if not all_models_sorted:
         st.info("暂无模型数据。")
     else:
-        model_options = ["全部模型"] + all_models_sorted
-        selected_model = st.selectbox(
+        total_calls_all  = sum(model_calls.values())
+        total_tokens_all = sum(model_tokens.values())
+        def _avg(tokens: int, calls: int) -> str:
+            return f"{tokens // calls:,}" if calls else "—"
+
+        model_options = [f"全部模型（{total_calls_all:,} 次 / {_abbr(total_tokens_all)} / 均 {_avg(total_tokens_all, total_calls_all)}）"] + [
+            f"{m}（{model_calls[m]:,} 次 / {_abbr(model_tokens[m])} / 均 {_avg(model_tokens[m], model_calls[m])}）"
+            for m in all_models_sorted
+        ]
+        # 用于实际过滤的原始模型名映射
+        model_option_map = {opt: (None if i == 0 else all_models_sorted[i - 1])
+                            for i, opt in enumerate(model_options)}
+        selected_option = st.selectbox(
             "选择模型",
             model_options,
             index=0,
             key="token_model_filter",
         )
+        selected_model = selected_option  # 用于显示
+
 
         def _model_row_stats(row: dict, model: str | None) -> dict:
             """从 daily 行中提取指定模型（None 表示全部）的 usage dict。"""
@@ -688,7 +704,7 @@ def render_token_stats():
                 "input": 0, "output": 0, "cache_read": 0, "total": 0, "calls": 0,
             })
 
-        filter_model = None if selected_model == "全部模型" else selected_model
+        filter_model = model_option_map[selected_option]
 
         # 过滤后的 metric 卡片
         def sum_period_model(predicate, model: str | None) -> dict:
@@ -734,7 +750,7 @@ def render_token_stats():
             })
         if model_chart_data:
             df_mchart = pd.DataFrame(model_chart_data).set_index("date")
-            label_suffix = f"（{selected_model}）" if filter_model else ""
+            label_suffix = f"（{filter_model}）" if filter_model else ""
             st.caption(f"近 30 天每日 Token 构成{label_suffix}")
             st.bar_chart(df_mchart, y=["输出", "输入", "缓存命中"])
 
@@ -755,7 +771,7 @@ def render_token_stats():
         if model_table_rows:
             st.dataframe(pd.DataFrame(model_table_rows), use_container_width=True, hide_index=True)
         else:
-            st.info(f"所选模型「{selected_model}」在当前数据中无记录。")
+            st.info(f"所选模型「{filter_model}」在当前数据中无记录。")
 
 
 def render_records(records: list[dict], translate: bool = False, initial_model: str = ""):
