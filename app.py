@@ -621,13 +621,15 @@ def _render_modern_bar_chart(df, title):
     # 深色主题布局
     fig.update_layout(
         template="plotly_dark",
-        margin=dict(l=0, r=0, t=50, b=0),
+        margin=dict(l=0, r=0, t=50, b=60),
         legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
+            orientation="h", yanchor="top", y=-0.18,
             xanchor="center", x=0.5,
-            font=dict(size=11, color="#E5E7EB")
+            font=dict(size=11, color="#E5E7EB"),
+            title_text="",
         ),
         font=dict(family="Inter, system-ui, sans-serif", size=12, color="#E5E7EB"),
+        title_x=0,
         title_font=dict(size=15, color="#F9FAFB"),
         plot_bgcolor="rgba(31, 41, 55, 0.95)",
         paper_bgcolor="rgba(31, 41, 55, 0.95)",
@@ -643,7 +645,8 @@ def _render_modern_bar_chart(df, title):
         ),
         opacity=0.9,
         texttemplate="%{y:,.0s}",
-        textposition="outside",
+        textposition="inside",
+        insidetextanchor="middle",
         textfont=dict(size=9, color="#F3F4F6"),
         hovertemplate=(
             "<b>%{x}</b><br>"
@@ -653,6 +656,7 @@ def _render_modern_bar_chart(df, title):
     
     # 坐标轴优化
     fig.update_xaxes(
+        title_text="",
         tickangle=-45, tickfont=dict(size=10, color="#9CA3AF"),
         showgrid=True, gridcolor="#374151", zeroline=False,
     )
