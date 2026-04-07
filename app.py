@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from deep_translator import GoogleTranslator
+import plotly.express as px
 
 
 @st.cache_data(max_entries=2048)
@@ -596,6 +597,83 @@ def scan_token_stats(fingerprint: str) -> list[dict]:
     return sorted(daily.values(), key=lambda x: x["date"])
 
 
+
+def _render_modern_bar_chart(df, title):
+    """深色霓虹风格柱状图 - 方案 B"""
+    df_melted = df.melt(
+        id_vars="date", var_name="type", value_name="Tokens",
+        value_vars=["输出", "输入", "缓存命中"]
+    )
+    
+    # 霓虹渐变配色
+    color_map = {
+        "输出": "#8B5CF6",      # 紫罗兰霓虹
+        "输入": "#EC4899",      # 粉红霓虹
+        "缓存命中": "#06B6D4"   # 青色霓虹
+    }
+    
+    fig = px.bar(
+        df_melted, x="date", y="Tokens", color="type",
+        color_discrete_map=color_map, title=title,
+        barmode="stack",
+    )
+    
+    # 深色主题布局
+    fig.update_layout(
+        template="plotly_dark",
+        margin=dict(l=0, r=0, t=50, b=0),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="center", x=0.5,
+            font=dict(size=11, color="#E5E7EB")
+        ),
+        font=dict(family="Inter, system-ui, sans-serif", size=12, color="#E5E7EB"),
+        title_font=dict(size=15, color="#F9FAFB"),
+        plot_bgcolor="rgba(31, 41, 55, 0.95)",
+        paper_bgcolor="rgba(31, 41, 55, 0.95)",
+        bargap=0.1,
+        bargroupgap=0.05,
+    )
+    
+    # 霓虹发光柱状图
+    fig.update_traces(
+        marker=dict(
+            line=dict(width=2, color="rgba(255,255,255,0.1)"),
+            cornerradius="30%",
+        ),
+        opacity=0.9,
+        texttemplate="%{y:,.0s}",
+        textposition="outside",
+        textfont=dict(size=9, color="#F3F4F6"),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "%{fullData.name}: %{y:,.0f} tokens<extra></extra>"
+        ),
+    )
+    
+    # 坐标轴优化
+    fig.update_xaxes(
+        tickangle=-45, tickfont=dict(size=10, color="#9CA3AF"),
+        showgrid=True, gridcolor="#374151", zeroline=False,
+    )
+    
+    fig.update_yaxes(
+        separatethousands=True, showgrid=True, gridcolor="#374151",
+        zeroline=False, tickfont=dict(size=10, color="#9CA3AF"),
+    )
+    
+    fig.update_layout(height=420)
+    
+    st.plotly_chart(fig, use_container_width=True, config={
+        "displayModeBar": True,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+        "toImageButtonOptions": {
+            "format": "png", "filename": "token_stats_dark",
+            "height": 500, "width": 1200, "scale": 2
+        }
+    })
+
+
 def render_token_stats():
     """Render the Token Statistics tab."""
     # Build directory fingerprint for cache invalidation
@@ -658,7 +736,7 @@ def render_token_stats():
             .set_index("date")
         )
         st.caption("近 30 天每日 Token 构成（输出 / 输入 / 缓存命中）")
-        st.bar_chart(df_chart, y=["输出", "输入", "缓存命中"])
+        _render_modern_bar_chart(df_chart.reset_index(), "近 30 天每日 Token 使用量")
 
     st.divider()
 
@@ -717,7 +795,7 @@ def render_token_stats():
 
 
         def _model_row_stats(row: dict, model: str | None) -> dict:
-            """从 daily 行中提取指定模型（None 表示全部）的 usage dict。"""
+            """Extract usage dict for a given model from daily row (None=all)."""
             if model is None:
                 return row
             return row.get("by_model", {}).get(model, {
@@ -772,7 +850,7 @@ def render_token_stats():
             df_mchart = pd.DataFrame(model_chart_data).set_index("date")
             label_suffix = f"（{filter_model}）" if filter_model else ""
             st.caption(f"近 30 天每日 Token 构成{label_suffix}")
-            st.bar_chart(df_mchart, y=["输出", "输入", "缓存命中"])
+            _render_modern_bar_chart(df_mchart.reset_index(), f"近 30 天 Token{label_suffix}")
 
         # 明细表（按所选模型过滤）
         model_table_rows = []
