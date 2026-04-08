@@ -598,8 +598,10 @@ def scan_token_stats(fingerprint: str) -> list[dict]:
 
 
 
-def _render_modern_bar_chart(df, title):
+def _render_modern_bar_chart(df, title, x_start=None, x_end=None):
     """深色霓虹风格柱状图 - 方案 B"""
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
     df_melted = df.melt(
         id_vars="date", var_name="type", value_name="Tokens",
         value_vars=["输出", "输入", "缓存命中"]
@@ -637,8 +639,9 @@ def _render_modern_bar_chart(df, title):
         bargroupgap=0.05,
     )
     
-    # 霓虹发光柱状图
+    # 霓虹发光柱状图（width 单位为毫秒，0.7天）
     fig.update_traces(
+        width=86400000 * 0.7,
         marker=dict(
             line=dict(width=2, color="rgba(255,255,255,0.1)"),
             cornerradius="30%",
@@ -655,11 +658,19 @@ def _render_modern_bar_chart(df, title):
     )
     
     # 坐标轴优化
-    fig.update_xaxes(
+    xaxes_opts = dict(
         title_text="",
+        type="date",
         tickangle=-45, tickfont=dict(size=10, color="#9CA3AF"),
         showgrid=True, gridcolor="#374151", zeroline=False,
     )
+    if x_start is not None and x_end is not None:
+        # 用 datetime 字符串设置范围，避免 date + 0.5天被截断
+        xaxes_opts["range"] = [
+            f"{x_start.isoformat()}T00:00:00",
+            f"{x_end.isoformat()}T23:59:59",
+        ]
+    fig.update_xaxes(**xaxes_opts)
     
     fig.update_yaxes(
         separatethousands=True, showgrid=True, gridcolor="#374151",
@@ -730,17 +741,19 @@ def render_token_stats():
 
     st.divider()
 
-    # Stacked bar chart: recent 30 calendar days (consistent with metric cards)
+    # Stacked bar chart: recent 15 calendar days
+    day15_start = today - timedelta(days=14)
+    day15_str = day15_start.isoformat()
     day30_str = day30_start.isoformat()
-    chart_data = [row for row in stats if row["date"] >= day30_str]
+    chart_data = [row for row in stats if row["date"] >= day15_str]
     if chart_data:
         df_chart = (
             pd.DataFrame(chart_data)[["date", "output", "input", "cache_read"]]
             .rename(columns={"output": "输出", "input": "输入", "cache_read": "缓存命中"})
             .set_index("date")
         )
-        st.caption("近 30 天每日 Token 构成（输出 / 输入 / 缓存命中）")
-        _render_modern_bar_chart(df_chart.reset_index(), "近 30 天每日 Token 使用量")
+        st.caption("近 15 天每日 Token 构成（输出 / 输入 / 缓存命中）")
+        _render_modern_bar_chart(df_chart.reset_index(), "近 15 天每日 Token 使用量", x_start=day15_start, x_end=today)
 
     st.divider()
 
@@ -838,10 +851,10 @@ def render_token_stats():
                 st.metric(f"{label} Total", _abbr(t["total"]))
                 st.caption(f"out:{t['output']:,}  ·  {t['calls']} 次")
 
-        # 近 30 天图表（按所选模型过滤）
+        # 近 15 天图表（按所选模型过滤）
         model_chart_data = []
         for row in stats:
-            if row["date"] < day30_str:
+            if row["date"] < day15_str:
                 continue
             mr = _model_row_stats(row, filter_model)
             model_chart_data.append({
@@ -853,8 +866,8 @@ def render_token_stats():
         if model_chart_data:
             df_mchart = pd.DataFrame(model_chart_data).set_index("date")
             label_suffix = f"（{filter_model}）" if filter_model else ""
-            st.caption(f"近 30 天每日 Token 构成{label_suffix}")
-            _render_modern_bar_chart(df_mchart.reset_index(), f"近 30 天 Token{label_suffix}")
+            st.caption(f"近 15 天每日 Token 构成{label_suffix}")
+            _render_modern_bar_chart(df_mchart.reset_index(), f"近 15 天 Token{label_suffix}", x_start=day15_start, x_end=today)
 
         # 明细表（按所选模型过滤）
         model_table_rows = []
