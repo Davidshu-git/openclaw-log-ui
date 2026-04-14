@@ -131,6 +131,8 @@ def detect_session_type(filepath: str, mtime: float) -> tuple[str, str]:
                             stype = "cron"
                         elif "[Subagent Context]" in text:
                             stype = "subagent"
+                        elif "Write a dream diary entry" in text:
+                            stype = "dreaming"
                         else:
                             stype = "main"
                     if stype and model_id:
@@ -142,7 +144,7 @@ def detect_session_type(filepath: str, mtime: float) -> tuple[str, str]:
     return stype or "subagent", model_id
 
 
-_TYPE_BADGE = {"main": "主", "cron": "C", "subagent": "子"}
+_TYPE_BADGE = {"main": "主", "cron": "C", "subagent": "子", "dreaming": "💤"}
 _re_startup_model = re.compile(r"model:\s*\S+/(\S+)")
 
 
@@ -508,6 +510,8 @@ def render_meta_record(record: dict):
 
     elif rtype == "custom":
         custom_type = record.get("customType", rtype)
+        if custom_type.startswith("openclaw:bootstrap-context") or custom_type == "openclaw.cache-ttl":
+            return
         data = record.get("data", {})
         with st.expander(f"⚙️ {custom_type}  ·  {ts}", expanded=False):
             st.code(json.dumps(data, indent=2, ensure_ascii=False), language="json")
@@ -1149,8 +1153,8 @@ def sidebar() -> str | None:
         if log_mode == "💬 对话日志":
             for f in files:
                 file_types[f["path"]] = detect_session_type(f["path"], f["mtime"])
-            _FILTER_OPTIONS = ["全部", "🏠 主会话", "⏰ Cron", "🤖 子Agent"]
-            _FILTER_MAP = {"全部": None, "🏠 主会话": "main", "⏰ Cron": "cron", "🤖 子Agent": "subagent"}
+            _FILTER_OPTIONS = ["全部", "🏠 主会话", "⏰ Cron", "🤖 子Agent", "💤 Dreaming"]
+            _FILTER_MAP = {"全部": None, "🏠 主会话": "main", "⏰ Cron": "cron", "🤖 子Agent": "subagent", "💤 Dreaming": "dreaming"}
             type_filter = st.selectbox(
                 "type_filter",
                 _FILTER_OPTIONS,
