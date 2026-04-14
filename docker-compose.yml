@@ -8,8 +8,8 @@ services:
       - "8501"
     volumes:
       - ./app.py:/app/app.py:ro
-      - ${OPENCLAW_SESSIONS_DIR:-~/.openclaw/agents/main/sessions}:/sessions:ro
-      - ${OPENCLAW_CRON_DIR:-~/.openclaw/cron/runs}:/cron-runs:ro
+      - ${OPENCLAW_SESSIONS_DIR:-/volume1/UserFolder/shudawei/.openclaw/agents/main/sessions}:/sessions:ro
+      - ${OPENCLAW_CRON_DIR:-/volume1/UserFolder/shudawei/.openclaw/cron/runs}:/cron-runs:ro
     environment:
       - LOG_DIR=/sessions
       - EXTRA_LOG_DIR=/cron-runs
