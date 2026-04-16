@@ -745,19 +745,27 @@ def render_token_stats():
 
     st.divider()
 
-    # Stacked bar chart: recent 15 calendar days
-    day15_start = today - timedelta(days=14)
-    day15_str = day15_start.isoformat()
+    # Stacked bar chart: dynamic day range
+    chart_days = st.radio(
+        "图表范围",
+        options=[7, 15, 30],
+        index=1,
+        horizontal=True,
+        format_func=lambda n: f"近 {n} 天",
+        key="token_chart_days",
+    )
+    chart_start = today - timedelta(days=chart_days - 1)
+    chart_str = chart_start.isoformat()
     day30_str = day30_start.isoformat()
-    chart_data = [row for row in stats if row["date"] >= day15_str]
+    chart_data = [row for row in stats if row["date"] >= chart_str]
     if chart_data:
         df_chart = (
             pd.DataFrame(chart_data)[["date", "output", "input", "cache_read"]]
             .rename(columns={"output": "输出", "input": "输入", "cache_read": "缓存命中"})
             .set_index("date")
         )
-        st.caption("近 15 天每日 Token 构成（输出 / 输入 / 缓存命中）")
-        _render_modern_bar_chart(df_chart.reset_index(), "近 15 天每日 Token 使用量", x_start=day15_start, x_end=today)
+        st.caption(f"近 {chart_days} 天每日 Token 构成（输出 / 输入 / 缓存命中）")
+        _render_modern_bar_chart(df_chart.reset_index(), f"近 {chart_days} 天每日 Token 使用量", x_start=chart_start, x_end=today)
 
     st.divider()
 
@@ -855,10 +863,10 @@ def render_token_stats():
                 st.metric(f"{label} Total", _abbr(t["total"]))
                 st.caption(f"out:{t['output']:,}  ·  {t['calls']} 次")
 
-        # 近 15 天图表（按所选模型过滤）
+        # 按模型图表（复用上方选择的天数范围）
         model_chart_data = []
         for row in stats:
-            if row["date"] < day15_str:
+            if row["date"] < chart_str:
                 continue
             mr = _model_row_stats(row, filter_model)
             model_chart_data.append({
@@ -870,8 +878,8 @@ def render_token_stats():
         if model_chart_data:
             df_mchart = pd.DataFrame(model_chart_data).set_index("date")
             label_suffix = f"（{filter_model}）" if filter_model else ""
-            st.caption(f"近 15 天每日 Token 构成{label_suffix}")
-            _render_modern_bar_chart(df_mchart.reset_index(), f"近 15 天 Token{label_suffix}", x_start=day15_start, x_end=today)
+            st.caption(f"近 {chart_days} 天每日 Token 构成{label_suffix}")
+            _render_modern_bar_chart(df_mchart.reset_index(), f"近 {chart_days} 天 Token{label_suffix}", x_start=chart_start, x_end=today)
 
         # 明细表（按所选模型过滤）
         model_table_rows = []
